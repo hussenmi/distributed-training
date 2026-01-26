@@ -1,78 +1,75 @@
 """
-Distributed Training Example: DDP vs FSDP with HuggingFace Accelerate
+Distributed Training Comparison: DDP vs FSDP
+Fine-tuning DINOv2 on Food-101 using HuggingFace Accelerate
 
-This script demonstrates how to train a Vision Transformer (ViT) using
-either DDP or FSDP, controlled entirely by the Accelerate config file.
-The same script works for both strategies - just change the config.
+This script fine-tunes a pretrained DINOv2 model for image classification.
+The same script works with both DDP and FSDP - the strategy is controlled
+entirely by the Accelerate config file.
 
-Usage:
+Usage (single node):
     accelerate launch --config_file config_ddp.yaml train.py
     accelerate launch --config_file config_fsdp.yaml train.py
+
+Usage (multi-node SLURM):
+    See the provided SLURM job scripts (job_ddp.sh, job_fsdp.sh)
 """
 
 import argparse
 import time
+import os
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from transformers import ViTForImageClassification, ViTConfig
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="DDP vs FSDP Training Comparison")
-    parser.add_argument("--model-size", type=str, default="base", choices=["small", "base", "large"],
-                        help="ViT model size (small/base/large)")
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size per GPU")
-    parser.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--data-dir", type=str, default="./data", help="Dataset directory")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--log-interval", type=int, default=10, help="Log every N steps")
-    return parser.parse_args()
+class DINOv2Classifier(nn.Module):
+    """
+    DINOv2 backbone with a classification head for fine-tuning.
+
+    DINOv2 was trained with self-supervised learning and produces rich
+    visual features. We freeze or fine-tune the backbone and train a
+    linear classifier on top.
+    """
+
+    def __init__(self, num_classes: int = 101, backbone: str = "dinov2_base", freeze_backbone: bool = False):
+        super().__init__()
+
+        # Load pretrained DINOv2 from torch hub
+        self.backbone = torch.hub.load('facebookresearch/dinov2', backbone)
+        self.hidden_size = self.backbone.embed_dim  # 768 for base, 384 for small
+
+        if freeze_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(self.hidden_size),
+            nn.Linear(self.hidden_size, num_classes)
+        )
+
+    def forward(self, x):
+        # DINOv2 forward returns CLS token features
+        features = self.backbone(x)  # (batch, hidden_size)
+        logits = self.classifier(features)  # (batch, num_classes)
+        return logits
 
 
-def get_vit_config(size: str, num_classes: int = 10) -> ViTConfig:
-    """Return ViT configuration based on size."""
-    configs = {
-        "small": ViTConfig(
-            hidden_size=384,
-            num_hidden_layers=12,
-            num_attention_heads=6,
-            intermediate_size=1536,
-            image_size=224,
-            patch_size=16,
-            num_labels=num_classes,
-        ),
-        "base": ViTConfig(
-            hidden_size=768,
-            num_hidden_layers=12,
-            num_attention_heads=12,
-            intermediate_size=3072,
-            image_size=224,
-            patch_size=16,
-            num_labels=num_classes,
-        ),
-        "large": ViTConfig(
-            hidden_size=1024,
-            num_hidden_layers=24,
-            num_attention_heads=16,
-            intermediate_size=4096,
-            image_size=224,
-            patch_size=16,
-            num_labels=num_classes,
-        ),
-    }
-    return configs[size]
+def get_dataloaders(data_dir: str, batch_size: int, num_workers: int = 4):
+    """
+    Create train and validation dataloaders for Food-101.
 
+    Food-101 contains 101 food categories with 101,000 images total.
+    Each class has 750 training and 250 test images.
+    Dataset auto-downloads on first run (~5GB).
+    """
 
-def get_dataloaders(data_dir: str, batch_size: int):
-    """Create train and validation dataloaders for CIFAR-10."""
-    # Transforms: resize to 224x224 for ViT
+    # DINOv2 was trained on 224x224 images with ImageNet normalization
     train_transform = transforms.Compose([
         transforms.Resize(256),
         transforms.RandomCrop(224),
@@ -88,28 +85,37 @@ def get_dataloaders(data_dir: str, batch_size: int):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-    train_dataset = datasets.CIFAR10(
-        root=data_dir, train=True, download=True, transform=train_transform
+    train_dataset = datasets.Food101(
+        root=data_dir, split='train', download=True, transform=train_transform
     )
-    val_dataset = datasets.CIFAR10(
-        root=data_dir, train=False, download=True, transform=val_transform
+    val_dataset = datasets.Food101(
+        root=data_dir, split='test', download=True, transform=val_transform
     )
 
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True,
-        num_workers=4, pin_memory=True
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True  # For consistent batch sizes in distributed training
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False,
-        num_workers=4, pin_memory=True
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
     )
 
     return train_loader, val_loader
 
 
-def train_epoch(model, train_loader, optimizer, accelerator, epoch, log_interval):
+def train_epoch(model, train_loader, optimizer, scheduler, accelerator, epoch, log_interval):
     """Train for one epoch."""
     model.train()
+    criterion = nn.CrossEntropyLoss()
+
     total_loss = 0
     correct = 0
     total = 0
@@ -118,24 +124,39 @@ def train_epoch(model, train_loader, optimizer, accelerator, epoch, log_interval
     for batch_idx, (images, labels) in enumerate(train_loader):
         optimizer.zero_grad()
 
-        outputs = model(images, labels=labels)
-        loss = outputs.loss
+        logits = model(images)
+        loss = criterion(logits, labels)
 
         accelerator.backward(loss)
         optimizer.step()
 
+        if scheduler is not None:
+            scheduler.step()
+
         total_loss += loss.item()
-        predictions = outputs.logits.argmax(dim=-1)
+        predictions = logits.argmax(dim=-1)
         correct += (predictions == labels).sum().item()
         total += labels.size(0)
 
-        if batch_idx % log_interval == 0 and accelerator.is_main_process:
+        if batch_idx % log_interval == 0:
+            # Gather metrics across processes for accurate logging
             elapsed = time.time() - start_time
-            samples_per_sec = (batch_idx + 1) * train_loader.batch_size * accelerator.num_processes / elapsed
+            samples_seen = (batch_idx + 1) * train_loader.batch_size * accelerator.num_processes
+            samples_per_sec = samples_seen / elapsed
+
+            # Get current learning rate
+            current_lr = optimizer.param_groups[0]['lr']
+
+            # Log memory on rank 0
+            memory_info = ""
+            if torch.cuda.is_available():
+                memory_gb = torch.cuda.memory_allocated() / 1e9
+                memory_info = f" | Mem: {memory_gb:.2f}GB"
+
             accelerator.print(
                 f"Epoch {epoch} | Batch {batch_idx}/{len(train_loader)} | "
-                f"Loss: {loss.item():.4f} | "
-                f"Throughput: {samples_per_sec:.1f} samples/sec"
+                f"Loss: {loss.item():.4f} | LR: {current_lr:.2e} | "
+                f"Throughput: {samples_per_sec:.1f} samples/sec{memory_info}"
             )
 
     avg_loss = total_loss / len(train_loader)
@@ -147,25 +168,70 @@ def train_epoch(model, train_loader, optimizer, accelerator, epoch, log_interval
 def evaluate(model, val_loader, accelerator):
     """Evaluate on validation set."""
     model.eval()
+    criterion = nn.CrossEntropyLoss()
+
     total_loss = 0
     correct = 0
     total = 0
 
     for images, labels in val_loader:
-        outputs = model(images, labels=labels)
-        total_loss += outputs.loss.item()
-        predictions = outputs.logits.argmax(dim=-1)
+        logits = model(images)
+        loss = criterion(logits, labels)
+
+        total_loss += loss.item()
+        predictions = logits.argmax(dim=-1)
         correct += (predictions == labels).sum().item()
         total += labels.size(0)
 
     # Gather metrics across all processes
-    correct = torch.tensor(correct, device=accelerator.device)
-    total = torch.tensor(total, device=accelerator.device)
-    correct, total = accelerator.gather_for_metrics((correct, total))
+    correct_tensor = torch.tensor(correct, device=accelerator.device)
+    total_tensor = torch.tensor(total, device=accelerator.device)
+    correct_tensor, total_tensor = accelerator.gather_for_metrics((correct_tensor, total_tensor))
 
     avg_loss = total_loss / len(val_loader)
-    accuracy = correct.sum().item() / total.sum().item()
+    accuracy = correct_tensor.sum().item() / total_tensor.sum().item()
     return avg_loss, accuracy
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="DDP vs FSDP: Fine-tuning DINOv2 on Food-101")
+
+    # Model arguments
+    parser.add_argument("--backbone", type=str, default="dinov2_base",
+                        choices=["dinov2_small", "dinov2_base", "dinov2_large"],
+                        help="DINOv2 backbone size")
+    parser.add_argument("--freeze-backbone", action="store_true",
+                        help="Freeze backbone weights (only train classifier head)")
+
+    # Training arguments
+    parser.add_argument("--batch-size", type=int, default=32,
+                        help="Batch size per GPU")
+    parser.add_argument("--epochs", type=int, default=5,
+                        help="Number of training epochs")
+    parser.add_argument("--lr", type=float, default=1e-4,
+                        help="Learning rate")
+    parser.add_argument("--weight-decay", type=float, default=0.01,
+                        help="Weight decay for AdamW")
+    parser.add_argument("--warmup-steps", type=int, default=500,
+                        help="Number of warmup steps for LR scheduler")
+
+    # Data arguments
+    parser.add_argument("--data-dir", type=str, default="./data",
+                        help="Dataset directory")
+    parser.add_argument("--num-workers", type=int, default=4,
+                        help="Number of dataloader workers per process")
+
+    # Logging arguments
+    parser.add_argument("--log-interval", type=int, default=50,
+                        help="Log every N steps")
+    parser.add_argument("--output-dir", type=str, default="./outputs",
+                        help="Output directory for checkpoints")
+
+    # Reproducibility
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed")
+
+    return parser.parse_args()
 
 
 def main():
@@ -175,46 +241,83 @@ def main():
     accelerator = Accelerator()
     set_seed(args.seed)
 
-    # Print distributed training info
+    # Create output directory
     if accelerator.is_main_process:
-        print("=" * 60)
-        print("Distributed Training Configuration")
-        print("=" * 60)
-        print(f"Distributed type: {accelerator.distributed_type}")
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    # Print configuration
+    if accelerator.is_main_process:
+        print("=" * 70)
+        print("Distributed Training: Fine-tuning DINOv2 on Food-101")
+        print("=" * 70)
+        print(f"Strategy: {accelerator.distributed_type}")
         print(f"Number of processes: {accelerator.num_processes}")
         print(f"Mixed precision: {accelerator.mixed_precision}")
         print(f"Device: {accelerator.device}")
-        print(f"Model size: {args.model_size}")
+        print("-" * 70)
+        print(f"Backbone: {args.backbone}")
+        print(f"Freeze backbone: {args.freeze_backbone}")
         print(f"Batch size per GPU: {args.batch_size}")
         print(f"Effective batch size: {args.batch_size * accelerator.num_processes}")
-        print("=" * 60)
+        print(f"Learning rate: {args.lr}")
+        print(f"Epochs: {args.epochs}")
+        print("=" * 70)
 
     # Create model
-    config = get_vit_config(args.model_size, num_classes=10)
-    model = ViTForImageClassification(config)
-
-    # Log model size
-    num_params = sum(p.numel() for p in model.parameters())
-    if accelerator.is_main_process:
-        print(f"Model parameters: {num_params:,} ({num_params / 1e6:.1f}M)")
-
-    # Create dataloaders
-    train_loader, val_loader = get_dataloaders(args.data_dir, args.batch_size)
-
-    # Create optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-
-    # Prepare for distributed training - Accelerate handles the strategy
-    model, optimizer, train_loader, val_loader = accelerator.prepare(
-        model, optimizer, train_loader, val_loader
+    accelerator.print(f"Loading {args.backbone} from torch hub...")
+    model = DINOv2Classifier(
+        num_classes=101,  # Food-101 has 101 classes
+        backbone=args.backbone,
+        freeze_backbone=args.freeze_backbone
     )
 
-    # Log memory usage after model preparation
+    # Log model info
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    if accelerator.is_main_process:
+        print(f"Total parameters: {total_params:,} ({total_params/1e6:.1f}M)")
+        print(f"Trainable parameters: {trainable_params:,} ({trainable_params/1e6:.1f}M)")
+
+    # Create dataloaders
+    accelerator.print("Loading Food-101 dataset (will download if needed)...")
+    train_loader, val_loader = get_dataloaders(
+        args.data_dir, args.batch_size, args.num_workers
+    )
+
+    if accelerator.is_main_process:
+        print(f"Training samples: {len(train_loader.dataset):,}")
+        print(f"Validation samples: {len(val_loader.dataset):,}")
+        print("=" * 70)
+
+    # Create optimizer
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay
+    )
+
+    # Learning rate scheduler with warmup
+    num_training_steps = len(train_loader) * args.epochs
+
+    def lr_lambda(current_step):
+        if current_step < args.warmup_steps:
+            return float(current_step) / float(max(1, args.warmup_steps))
+        return max(0.0, 1.0 - (current_step - args.warmup_steps) / (num_training_steps - args.warmup_steps))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    # Prepare for distributed training
+    # Accelerate wraps model with DDP or FSDP based on config
+    model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
+        model, optimizer, train_loader, val_loader, scheduler
+    )
+
+    # Log GPU memory after model preparation
     if accelerator.is_main_process and torch.cuda.is_available():
         memory_allocated = torch.cuda.memory_allocated() / 1e9
         memory_reserved = torch.cuda.memory_reserved() / 1e9
-        print(f"GPU Memory - Allocated: {memory_allocated:.2f} GB, Reserved: {memory_reserved:.2f} GB")
-        print("=" * 60)
+        print(f"GPU Memory after setup - Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB")
+        print("=" * 70)
 
     # Training loop
     best_accuracy = 0.0
@@ -224,14 +327,16 @@ def main():
         epoch_start = time.time()
 
         train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, accelerator, epoch, args.log_interval
+            model, train_loader, optimizer, scheduler, accelerator, epoch, args.log_interval
         )
+
         val_loss, val_acc = evaluate(model, val_loader, accelerator)
 
         epoch_time = time.time() - epoch_start
 
         if accelerator.is_main_process:
-            print(f"\nEpoch {epoch} Summary:")
+            print(f"\n{'='*70}")
+            print(f"Epoch {epoch} Summary:")
             print(f"  Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
             print(f"  Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
             print(f"  Epoch Time: {epoch_time:.2f}s")
@@ -241,21 +346,29 @@ def main():
                 # Save checkpoint
                 accelerator.wait_for_everyone()
                 unwrapped_model = accelerator.unwrap_model(model)
-                accelerator.save(
-                    unwrapped_model.state_dict(),
-                    Path(args.data_dir) / "best_model.pt"
-                )
+                checkpoint_path = Path(args.output_dir) / "best_model.pt"
+                accelerator.save(unwrapped_model.state_dict(), checkpoint_path)
                 print(f"  New best model saved! Accuracy: {best_accuracy:.4f}")
-            print()
+            print(f"{'='*70}\n")
 
     total_time = time.time() - training_start
 
     if accelerator.is_main_process:
-        print("=" * 60)
+        print("=" * 70)
         print("Training Complete!")
-        print(f"Total training time: {total_time:.2f}s")
+        print(f"Total training time: {total_time:.2f}s ({total_time/60:.1f} min)")
         print(f"Best validation accuracy: {best_accuracy:.4f}")
-        print("=" * 60)
+        print(f"Average throughput: {len(train_loader.dataset) * args.epochs / total_time:.1f} samples/sec")
+        print("=" * 70)
+
+        # Save final metrics
+        metrics_path = Path(args.output_dir) / "metrics.txt"
+        with open(metrics_path, "w") as f:
+            f.write(f"Strategy: {accelerator.distributed_type}\n")
+            f.write(f"Num processes: {accelerator.num_processes}\n")
+            f.write(f"Best accuracy: {best_accuracy:.4f}\n")
+            f.write(f"Total time: {total_time:.2f}s\n")
+            f.write(f"Throughput: {len(train_loader.dataset) * args.epochs / total_time:.1f} samples/sec\n")
 
 
 if __name__ == "__main__":

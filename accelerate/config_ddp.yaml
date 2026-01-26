@@ -1,22 +1,52 @@
 # Accelerate Configuration: Distributed Data Parallel (DDP)
+# ==============================================================================
 #
-# DDP replicates the entire model on each GPU and synchronizes gradients
-# after each backward pass. Best when the model fits in a single GPU's memory.
+# DDP (DistributedDataParallel) is PyTorch's standard data parallelism strategy:
 #
-# Usage: accelerate launch --config_file config_ddp.yaml train.py
+# How it works:
+#   1. Each GPU holds a COMPLETE copy of the model
+#   2. Each GPU processes different mini-batches of data
+#   3. After backward pass, gradients are synchronized via all-reduce
+#   4. All GPUs update their model copies identically
+#
+# Memory per GPU:
+#   - Full model parameters
+#   - Full gradients
+#   - Full optimizer states (2x model size for Adam)
+#   - Activations for the batch
+#
+# Best for:
+#   - Models that fit in a single GPU's memory
+#   - Maximum training throughput (minimal communication)
+#   - Simple distributed training setup
+#
+# Usage:
+#   accelerate launch --config_file config_ddp.yaml train.py
+#
+# ==============================================================================
 
 compute_environment: LOCAL_MACHINE
 distributed_type: MULTI_GPU
-downcast_bf16: 'no'
-enable_cpu_affinity: false
+
+# Hardware configuration
 gpu_ids: all
-machine_rank: 0
-main_training_function: main
-mixed_precision: fp16
 num_machines: 1
-num_processes: 2  # Adjust based on available GPUs
+num_processes: 4  # Adjust to your GPU count
+
+# Multi-node settings (when num_machines > 1)
+machine_rank: 0
+main_process_ip: null
+main_process_port: 29500
 rdzv_backend: static
 same_network: true
+
+# Training configuration
+mixed_precision: fp16  # Use fp16 for faster training and lower memory
+downcast_bf16: 'no'
+
+# Other settings
+main_training_function: main
+enable_cpu_affinity: false
 tpu_env: []
 tpu_use_cluster: false
 tpu_use_sudo: false

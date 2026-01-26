@@ -1,62 +1,124 @@
 # Accelerate Configuration: Fully Sharded Data Parallel (FSDP)
+# ==============================================================================
 #
-# FSDP shards model parameters, gradients, and optimizer states across GPUs.
-# This dramatically reduces per-GPU memory, enabling training of larger models.
-# The tradeoff is additional communication overhead for gathering parameters.
+# FSDP (FullyShardedDataParallel) is PyTorch's memory-efficient parallelism:
 #
-# Usage: accelerate launch --config_file config_fsdp.yaml train.py
+# How it works:
+#   1. Model parameters are SHARDED across GPUs (each GPU holds a slice)
+#   2. Before forward pass: all-gather to reconstruct layer parameters
+#   3. After forward pass: discard gathered parameters (keep only owned shard)
+#   4. During backward: all-gather again, compute gradients
+#   5. After backward: reduce-scatter gradients, each GPU updates its shard
+#
+# Memory per GPU (with FULL_SHARD):
+#   - 1/N of model parameters (N = number of GPUs)
+#   - 1/N of gradients
+#   - 1/N of optimizer states
+#   - Activations for the batch
+#
+# Sharding Strategies:
+#   - FULL_SHARD (1): Shard params + gradients + optimizer (most memory efficient)
+#   - SHARD_GRAD_OP (2): Shard gradients + optimizer only (faster, more memory)
+#   - NO_SHARD (3): Like DDP (no sharding)
+#
+# Best for:
+#   - Large models that don't fit in single GPU memory
+#   - Training with limited GPU memory
+#   - Models with >1B parameters
+#
+# Trade-off:
+#   - More communication overhead than DDP
+#   - ~10-20% slower throughput vs DDP for models that fit in memory
+#   - Enables training models that are impossible with DDP
+#
+# Usage:
+#   accelerate launch --config_file config_fsdp.yaml train.py
+#
+# ==============================================================================
 
 compute_environment: LOCAL_MACHINE
 distributed_type: FSDP
-downcast_bf16: 'no'
-enable_cpu_affinity: false
 
-# FSDP-specific configuration
-fsdp_config:
-  # Sharding strategy:
-  # - FULL_SHARD: Shard params, gradients, and optimizer states (most memory efficient)
-  # - SHARD_GRAD_OP: Shard gradients and optimizer states only
-  # - NO_SHARD: Equivalent to DDP (no sharding)
-  fsdp_sharding_strategy: FULL_SHARD
-
-  # When to offload parameters to CPU (saves GPU memory at cost of speed)
-  fsdp_offload_params: false
-
-  # Auto-wrap policy: automatically wrap model layers for FSDP
-  # transformer_based_wrap configures FSDP to shard at transformer layer boundaries
-  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
-
-  # Minimum number of parameters for a layer to be wrapped
-  fsdp_min_num_params: 1000000
-
-  # Backward prefetch for better overlap of communication and computation
-  fsdp_backward_prefetch: BACKWARD_PRE
-
-  # Forward prefetch (experimental, can improve performance)
-  fsdp_forward_prefetch: false
-
-  # State dict type for checkpointing
-  # FULL_STATE_DICT: Gather full state dict on rank 0 (easier to use, more memory)
-  # SHARDED_STATE_DICT: Keep sharded (more scalable)
-  fsdp_state_dict_type: FULL_STATE_DICT
-
-  # Sync module states at initialization
-  fsdp_sync_module_states: true
-
-  # Use original parameters (keeps a copy, uses more memory but faster)
-  fsdp_use_orig_params: true
-
-  # CPU RAM efficient loading
-  fsdp_cpu_ram_efficient_loading: true
-
+# Hardware configuration
 gpu_ids: all
-machine_rank: 0
-main_training_function: main
-mixed_precision: fp16
 num_machines: 1
-num_processes: 2  # Adjust based on available GPUs
+num_processes: 4  # Adjust to your GPU count
+
+# Multi-node settings (when num_machines > 1)
+machine_rank: 0
+main_process_ip: null
+main_process_port: 29500
 rdzv_backend: static
 same_network: true
+
+# Training configuration
+mixed_precision: fp16
+downcast_bf16: 'no'
+
+# ==============================================================================
+# FSDP-Specific Configuration
+# ==============================================================================
+fsdp_config:
+  # ---------------------------------------------------------------------------
+  # Sharding Strategy
+  # ---------------------------------------------------------------------------
+  # FULL_SHARD: Maximum memory savings - shards everything
+  # SHARD_GRAD_OP: Middle ground - faster but uses more memory
+  # NO_SHARD: Equivalent to DDP
+  fsdp_sharding_strategy: FULL_SHARD
+
+  # ---------------------------------------------------------------------------
+  # Auto-Wrap Policy
+  # ---------------------------------------------------------------------------
+  # Determines how the model is divided into FSDP units
+  # TRANSFORMER_BASED_WRAP: Wraps at transformer layer boundaries (recommended)
+  # SIZE_BASED_WRAP: Wraps based on parameter count threshold
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+
+  # Minimum parameters for a layer to be wrapped (for SIZE_BASED_WRAP)
+  fsdp_min_num_params: 1000000
+
+  # ---------------------------------------------------------------------------
+  # CPU Offloading (for extreme memory savings)
+  # ---------------------------------------------------------------------------
+  # Offload parameters to CPU when not in use
+  # Saves GPU memory but significantly slower
+  fsdp_offload_params: false
+
+  # ---------------------------------------------------------------------------
+  # Communication Optimization
+  # ---------------------------------------------------------------------------
+  # Prefetch parameters during backward pass for better overlap
+  # BACKWARD_PRE: Prefetch before current layer's backward
+  # BACKWARD_POST: Prefetch after current layer's backward
+  fsdp_backward_prefetch: BACKWARD_PRE
+
+  # Prefetch during forward pass (experimental)
+  fsdp_forward_prefetch: false
+
+  # ---------------------------------------------------------------------------
+  # State Dict Configuration (for checkpointing)
+  # ---------------------------------------------------------------------------
+  # FULL_STATE_DICT: Gather complete state dict on rank 0 (easier to use)
+  # SHARDED_STATE_DICT: Keep sharded (more scalable for huge models)
+  # LOCAL_STATE_DICT: Each rank saves its own shard
+  fsdp_state_dict_type: FULL_STATE_DICT
+
+  # ---------------------------------------------------------------------------
+  # Other Settings
+  # ---------------------------------------------------------------------------
+  # Sync module states across ranks at init (important for pretrained models)
+  fsdp_sync_module_states: true
+
+  # Keep original parameters (faster but uses more memory)
+  fsdp_use_orig_params: true
+
+  # Efficient CPU RAM loading (useful for large models)
+  fsdp_cpu_ram_efficient_loading: true
+
+# Other settings
+main_training_function: main
+enable_cpu_affinity: false
 tpu_env: []
 tpu_use_cluster: false
 tpu_use_sudo: false
