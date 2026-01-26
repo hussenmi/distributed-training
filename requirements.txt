@@ -1,10 +1,17 @@
-# Distributed Training Comparison: DDP vs FSDP
-# Core dependencies
+# Distributed Training: DDP vs FSDP Comparison
+# Fine-tuning DINOv2 and LLMs
 
+# Core PyTorch
 torch>=2.0.0
 torchvision>=0.15.0
-transformers>=4.30.0
+
+# Distributed training
 accelerate>=0.25.0
 
-# Optional: for monitoring and profiling
+# Transformers and datasets (for LLM training)
+transformers>=4.36.0
+datasets>=2.14.0
+sentencepiece>=0.1.99  # For Mistral/Llama tokenizers
+
+# Optional: monitoring
 tensorboard>=2.14.0
