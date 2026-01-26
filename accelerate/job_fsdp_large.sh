@@ -1,0 +1,74 @@
+#!/bin/bash
+#SBATCH --job-name=dinov2_fsdp_large
+#SBATCH --time=4:00:00
+#SBATCH --partition=peerd
+
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=200G
+
+#SBATCH --output=logs/dinov2_fsdp_large_%j.out
+#SBATCH --error=logs/dinov2_fsdp_large_%j.err
+
+# ==============================================================================
+# FSDP Training: DINOv2-Large with Large Batch Size
+# ==============================================================================
+# This tests FSDP with the same memory-intensive configuration:
+#   - DINOv2-Large: 300M parameters
+#   - Batch size 256 per GPU: High activation memory
+#
+# Expected result: SUCCESS (FSDP shards model memory, leaving room for activations)
+# This demonstrates FSDP's value for large-scale training.
+# ==============================================================================
+
+source ~/.bashrc
+activate_env cg
+
+mkdir -p logs
+
+export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
+export MASTER_PORT=29500
+export NCCL_SOCKET_IFNAME=ib0
+export NCCL_IB_DISABLE=0
+
+GPUS_PER_NODE=4
+TOTAL_GPUS=$((SLURM_NNODES * GPUS_PER_NODE))
+
+echo "=============================================="
+echo "FSDP Large Model Test (Expect Success)"
+echo "=============================================="
+echo "Model: DINOv2-Large (300M params)"
+echo "Batch size per GPU: 256"
+echo "Total GPUs: $TOTAL_GPUS"
+echo "Sharding strategy: FULL_SHARD"
+echo "=============================================="
+
+srun --ntasks-per-node=1 --cpu-bind=none bash -c '
+    echo "[$(hostname)] Starting FSDP large model test"
+
+    accelerate launch \
+        --use_fsdp \
+        --num_machines=$SLURM_NNODES \
+        --num_processes='$TOTAL_GPUS' \
+        --machine_rank=$SLURM_NODEID \
+        --main_process_ip=$MASTER_ADDR \
+        --main_process_port=$MASTER_PORT \
+        --mixed_precision=fp16 \
+        --fsdp_sharding_strategy=1 \
+        --fsdp_auto_wrap_policy=TRANSFORMER_BASED_WRAP \
+        --fsdp_backward_prefetch=BACKWARD_PRE \
+        --fsdp_state_dict_type=FULL_STATE_DICT \
+        train.py \
+            --backbone large \
+            --batch-size 256 \
+            --epochs 2 \
+            --lr 1e-4 \
+            --data-dir /data1/peerd/ibrahih3/datasets \
+            --output-dir /data1/peerd/ibrahih3/distributed-training/outputs/fsdp_large \
+            --num-workers 8 \
+            --log-interval 10
+'
+
+echo "Job finished at: $(date)"
