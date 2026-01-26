@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 
 
@@ -289,8 +289,12 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # DDP kwargs: find_unused_parameters=True is needed for DINOv2
+    # because it has a mask_token parameter only used during pretraining
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+
     # Initialize Accelerator - this handles DDP/FSDP based on config
-    accelerator = Accelerator()
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
     set_seed(args.seed)
 
     # Create output directory
@@ -390,6 +394,7 @@ def main():
 
         epoch_time = time.time() - epoch_start
 
+        # Print epoch summary (rank 0 only)
         if accelerator.is_main_process:
             print(f"\n{'='*70}")
             print(f"Epoch {epoch} Summary:")
@@ -397,14 +402,17 @@ def main():
             print(f"  Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
             print(f"  Epoch Time: {epoch_time:.2f}s")
 
-            if val_acc > best_accuracy:
-                best_accuracy = val_acc
-                # Save checkpoint
-                accelerator.wait_for_everyone()
+        # Save checkpoint if best accuracy (all ranks must participate in sync)
+        if val_acc > best_accuracy:
+            best_accuracy = val_acc
+            accelerator.wait_for_everyone()  # All ranks must call this
+            if accelerator.is_main_process:
                 unwrapped_model = accelerator.unwrap_model(model)
                 checkpoint_path = Path(args.output_dir) / "best_model.pt"
                 accelerator.save(unwrapped_model.state_dict(), checkpoint_path)
                 print(f"  New best model saved! Accuracy: {best_accuracy:.4f}")
+
+        if accelerator.is_main_process:
             print(f"{'='*70}\n")
 
     total_time = time.time() - training_start

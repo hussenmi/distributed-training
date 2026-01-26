@@ -83,10 +83,8 @@ srun --ntasks-per-node=1 --cpu-bind=none bash -c '
         --mixed_precision=fp16 \
         --fsdp_sharding_strategy=1 \
         --fsdp_auto_wrap_policy=TRANSFORMER_BASED_WRAP \
-        --fsdp_backward_prefetch_policy=BACKWARD_PRE \
+        --fsdp_backward_prefetch=BACKWARD_PRE \
         --fsdp_state_dict_type=FULL_STATE_DICT \
-        --fsdp_sync_module_states=true \
-        --fsdp_use_orig_params=true \
         train.py \
             --backbone base \
             --batch-size 32 \
