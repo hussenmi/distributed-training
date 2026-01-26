@@ -1,0 +1,63 @@
+# Accelerate Configuration: Fully Sharded Data Parallel (FSDP)
+#
+# FSDP shards model parameters, gradients, and optimizer states across GPUs.
+# This dramatically reduces per-GPU memory, enabling training of larger models.
+# The tradeoff is additional communication overhead for gathering parameters.
+#
+# Usage: accelerate launch --config_file config_fsdp.yaml train.py
+
+compute_environment: LOCAL_MACHINE
+distributed_type: FSDP
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+
+# FSDP-specific configuration
+fsdp_config:
+  # Sharding strategy:
+  # - FULL_SHARD: Shard params, gradients, and optimizer states (most memory efficient)
+  # - SHARD_GRAD_OP: Shard gradients and optimizer states only
+  # - NO_SHARD: Equivalent to DDP (no sharding)
+  fsdp_sharding_strategy: FULL_SHARD
+
+  # When to offload parameters to CPU (saves GPU memory at cost of speed)
+  fsdp_offload_params: false
+
+  # Auto-wrap policy: automatically wrap model layers for FSDP
+  # transformer_based_wrap configures FSDP to shard at transformer layer boundaries
+  fsdp_auto_wrap_policy: TRANSFORMER_BASED_WRAP
+
+  # Minimum number of parameters for a layer to be wrapped
+  fsdp_min_num_params: 1000000
+
+  # Backward prefetch for better overlap of communication and computation
+  fsdp_backward_prefetch: BACKWARD_PRE
+
+  # Forward prefetch (experimental, can improve performance)
+  fsdp_forward_prefetch: false
+
+  # State dict type for checkpointing
+  # FULL_STATE_DICT: Gather full state dict on rank 0 (easier to use, more memory)
+  # SHARDED_STATE_DICT: Keep sharded (more scalable)
+  fsdp_state_dict_type: FULL_STATE_DICT
+
+  # Sync module states at initialization
+  fsdp_sync_module_states: true
+
+  # Use original parameters (keeps a copy, uses more memory but faster)
+  fsdp_use_orig_params: true
+
+  # CPU RAM efficient loading
+  fsdp_cpu_ram_efficient_loading: true
+
+gpu_ids: all
+machine_rank: 0
+main_training_function: main
+mixed_precision: fp16
+num_machines: 1
+num_processes: 2  # Adjust based on available GPUs
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
