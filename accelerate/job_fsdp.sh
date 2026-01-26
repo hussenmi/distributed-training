@@ -88,7 +88,7 @@ srun --ntasks-per-node=1 --cpu-bind=none bash -c '
         --fsdp_sync_module_states=true \
         --fsdp_use_orig_params=true \
         train.py \
-            --backbone dinov2_base \
+            --backbone base \
             --batch-size 32 \
             --epochs 5 \
             --lr 1e-4 \

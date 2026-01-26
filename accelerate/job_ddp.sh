@@ -68,7 +68,7 @@ srun --ntasks-per-node=1 --cpu-bind=none bash -c '
         --main_process_port=$MASTER_PORT \
         --mixed_precision=fp16 \
         train.py \
-            --backbone dinov2_base \
+            --backbone base \
             --batch-size 32 \
             --epochs 5 \
             --lr 1e-4 \

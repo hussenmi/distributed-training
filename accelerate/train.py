@@ -21,10 +21,49 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from accelerate import Accelerator
 from accelerate.utils import set_seed
+
+
+# DINOv2 model name mapping (user-friendly -> torch hub name)
+DINOV2_MODELS = {
+    "small": "dinov2_vits14",
+    "base": "dinov2_vitb14",
+    "large": "dinov2_vitl14",
+}
+
+
+def load_dinov2_backbone(backbone: str, accelerator: Accelerator):
+    """
+    Load DINOv2 backbone with proper synchronization for distributed training.
+
+    Only rank 0 downloads the model; other ranks wait then load from cache.
+    This prevents race conditions when multiple processes try to download.
+
+    Args:
+        backbone: One of "small", "base", "large"
+        accelerator: Accelerate accelerator instance
+    """
+    # Map user-friendly name to torch hub name
+    hub_name = DINOV2_MODELS.get(backbone, backbone)
+
+    if accelerator.is_main_process:
+        # Rank 0 downloads the model
+        print(f"[Rank 0] Downloading {hub_name} from torch hub...")
+        model = torch.hub.load('facebookresearch/dinov2', hub_name)
+        print(f"[Rank 0] Download complete.")
+
+    # Wait for rank 0 to finish downloading
+    accelerator.wait_for_everyone()
+
+    if not accelerator.is_main_process:
+        # Other ranks load from cache (no download needed)
+        model = torch.hub.load('facebookresearch/dinov2', hub_name)
+
+    return model
 
 
 class DINOv2Classifier(nn.Module):
@@ -36,11 +75,11 @@ class DINOv2Classifier(nn.Module):
     linear classifier on top.
     """
 
-    def __init__(self, num_classes: int = 101, backbone: str = "dinov2_base", freeze_backbone: bool = False):
+    def __init__(self, backbone_model: nn.Module, num_classes: int = 101, freeze_backbone: bool = False):
         super().__init__()
 
-        # Load pretrained DINOv2 from torch hub
-        self.backbone = torch.hub.load('facebookresearch/dinov2', backbone)
+        # Use the pre-loaded backbone (loaded with proper distributed sync)
+        self.backbone = backbone_model
         self.hidden_size = self.backbone.embed_dim  # 768 for base, 384 for small
 
         if freeze_backbone:
@@ -60,13 +99,15 @@ class DINOv2Classifier(nn.Module):
         return logits
 
 
-def get_dataloaders(data_dir: str, batch_size: int, num_workers: int = 4):
+def get_dataloaders(data_dir: str, batch_size: int, num_workers: int, accelerator: Accelerator):
     """
     Create train and validation dataloaders for Food-101.
 
     Food-101 contains 101 food categories with 101,000 images total.
     Each class has 750 training and 250 test images.
     Dataset auto-downloads on first run (~5GB).
+
+    Only rank 0 downloads; other ranks wait then load from disk.
     """
 
     # DINOv2 was trained on 224x224 images with ImageNet normalization
@@ -85,11 +126,22 @@ def get_dataloaders(data_dir: str, batch_size: int, num_workers: int = 4):
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
+    # Only rank 0 downloads the dataset
+    if accelerator.is_main_process:
+        print("[Rank 0] Downloading Food-101 dataset (if needed)...")
+        datasets.Food101(root=data_dir, split='train', download=True)
+        datasets.Food101(root=data_dir, split='test', download=True)
+        print("[Rank 0] Dataset ready.")
+
+    # Wait for rank 0 to finish downloading
+    accelerator.wait_for_everyone()
+
+    # All ranks load the dataset (no download, already on disk)
     train_dataset = datasets.Food101(
-        root=data_dir, split='train', download=True, transform=train_transform
+        root=data_dir, split='train', download=False, transform=train_transform
     )
     val_dataset = datasets.Food101(
-        root=data_dir, split='test', download=True, transform=val_transform
+        root=data_dir, split='test', download=False, transform=val_transform
     )
 
     train_loader = DataLoader(
@@ -111,7 +163,7 @@ def get_dataloaders(data_dir: str, batch_size: int, num_workers: int = 4):
     return train_loader, val_loader
 
 
-def train_epoch(model, train_loader, optimizer, scheduler, accelerator, epoch, log_interval):
+def train_epoch(model, train_loader, optimizer, scheduler, accelerator, epoch, log_interval, batch_size):
     """Train for one epoch."""
     model.train()
     criterion = nn.CrossEntropyLoss()
@@ -141,7 +193,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, accelerator, epoch, l
         if batch_idx % log_interval == 0:
             # Gather metrics across processes for accurate logging
             elapsed = time.time() - start_time
-            samples_seen = (batch_idx + 1) * train_loader.batch_size * accelerator.num_processes
+            samples_seen = (batch_idx + 1) * batch_size * accelerator.num_processes
             samples_per_sec = samples_seen / elapsed
 
             # Get current learning rate
@@ -197,9 +249,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="DDP vs FSDP: Fine-tuning DINOv2 on Food-101")
 
     # Model arguments
-    parser.add_argument("--backbone", type=str, default="dinov2_base",
-                        choices=["dinov2_small", "dinov2_base", "dinov2_large"],
-                        help="DINOv2 backbone size")
+    parser.add_argument("--backbone", type=str, default="base",
+                        choices=["small", "base", "large"],
+                        help="DINOv2 backbone size (small=22M, base=86M, large=300M params)")
     parser.add_argument("--freeze-backbone", action="store_true",
                         help="Freeze backbone weights (only train classifier head)")
 
@@ -263,11 +315,15 @@ def main():
         print(f"Epochs: {args.epochs}")
         print("=" * 70)
 
-    # Create model
+    # Load DINOv2 backbone with proper distributed synchronization
+    # Only rank 0 downloads, others wait then load from cache
     accelerator.print(f"Loading {args.backbone} from torch hub...")
+    backbone = load_dinov2_backbone(args.backbone, accelerator)
+
+    # Create classifier model
     model = DINOv2Classifier(
+        backbone_model=backbone,
         num_classes=101,  # Food-101 has 101 classes
-        backbone=args.backbone,
         freeze_backbone=args.freeze_backbone
     )
 
@@ -278,10 +334,10 @@ def main():
         print(f"Total parameters: {total_params:,} ({total_params/1e6:.1f}M)")
         print(f"Trainable parameters: {trainable_params:,} ({trainable_params/1e6:.1f}M)")
 
-    # Create dataloaders
-    accelerator.print("Loading Food-101 dataset (will download if needed)...")
+    # Create dataloaders (rank 0 downloads, others wait)
+    accelerator.print("Loading Food-101 dataset...")
     train_loader, val_loader = get_dataloaders(
-        args.data_dir, args.batch_size, args.num_workers
+        args.data_dir, args.batch_size, args.num_workers, accelerator
     )
 
     if accelerator.is_main_process:
@@ -327,7 +383,7 @@ def main():
         epoch_start = time.time()
 
         train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, scheduler, accelerator, epoch, args.log_interval
+            model, train_loader, optimizer, scheduler, accelerator, epoch, args.log_interval, args.batch_size
         )
 
         val_loss, val_acc = evaluate(model, val_loader, accelerator)
