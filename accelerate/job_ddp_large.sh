@@ -12,19 +12,8 @@
 #SBATCH --output=logs/dinov2_ddp_large_%j.out
 #SBATCH --error=logs/dinov2_ddp_large_%j.err
 
-# ==============================================================================
-# DDP Training: DINOv2-Large with Large Batch Size
-# ==============================================================================
-# This tests DDP with a configuration designed to stress GPU memory:
-#   - DINOv2-Large: 300M parameters
-#   - Batch size 256 per GPU: High activation memory
-#
-# Expected result: OOM (Out of Memory) error
-# This demonstrates when FSDP becomes necessary.
-# ==============================================================================
-
 source ~/.bashrc
-activate_env cg
+activate_env dis-tr
 
 mkdir -p logs
 
@@ -36,13 +25,9 @@ export NCCL_IB_DISABLE=0
 GPUS_PER_NODE=4
 TOTAL_GPUS=$((SLURM_NNODES * GPUS_PER_NODE))
 
-echo "=============================================="
-echo "DDP Large Model Test (Expect OOM)"
-echo "=============================================="
 echo "Model: DINOv2-Large (300M params)"
 echo "Batch size per GPU: 256"
 echo "Total GPUs: $TOTAL_GPUS"
-echo "=============================================="
 
 srun --ntasks-per-node=1 --cpu-bind=none bash -c '
     echo "[$(hostname)] Starting DDP large model test"

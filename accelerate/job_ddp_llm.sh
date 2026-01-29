@@ -12,23 +12,9 @@
 #SBATCH --output=logs/llm_ddp_%j.out
 #SBATCH --error=logs/llm_ddp_%j.err
 
-# ==============================================================================
-# DDP Training: Mistral-7B Fine-tuning
-# ==============================================================================
-# This tests DDP with a 7B parameter LLM.
-#
-# Memory requirements per GPU (DDP):
-#   - Parameters (fp16): ~14 GB
-#   - Gradients (fp16): ~14 GB
-#   - Optimizer states (Adam fp32): ~28 GB
-#   - Total: ~56 GB (before activations!)
-#
-# Expected result: OUT OF MEMORY
-# A100 80GB cannot fit full 7B model + gradients + optimizer + activations
-# ==============================================================================
 
 source ~/.bashrc
-activate_env cg
+activate_env dis-tr
 
 mkdir -p logs
 
@@ -43,17 +29,10 @@ export TRANSFORMERS_NO_FLASH_ATTENTION=1
 GPUS_PER_NODE=4
 TOTAL_GPUS=$((SLURM_NNODES * GPUS_PER_NODE))
 
-echo "=============================================="
-echo "DDP LLM Training (Expect OOM)"
-echo "=============================================="
+echo "DDP LLM Training"
 echo "Model: Mistral-7B (7 billion parameters)"
 echo "Strategy: DDP (full model on each GPU)"
 echo "Total GPUs: $TOTAL_GPUS"
-echo ""
-echo "Expected memory per GPU: ~56+ GB"
-echo "Available per GPU: 80 GB"
-echo "With activations: WILL EXCEED 80 GB -> OOM"
-echo "=============================================="
 
 srun --ntasks-per-node=1 --cpu-bind=none bash -c '
     echo "[$(hostname)] Starting DDP LLM training on node $SLURM_NODEID"

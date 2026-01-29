@@ -12,19 +12,8 @@
 #SBATCH --output=logs/dinov2_fsdp_large_%j.out
 #SBATCH --error=logs/dinov2_fsdp_large_%j.err
 
-# ==============================================================================
-# FSDP Training: DINOv2-Large with Large Batch Size
-# ==============================================================================
-# This tests FSDP with the same memory-intensive configuration:
-#   - DINOv2-Large: 300M parameters
-#   - Batch size 256 per GPU: High activation memory
-#
-# Expected result: SUCCESS (FSDP shards model memory, leaving room for activations)
-# This demonstrates FSDP's value for large-scale training.
-# ==============================================================================
-
 source ~/.bashrc
-activate_env cg
+activate_env dis-tr
 
 mkdir -p logs
 
@@ -36,14 +25,10 @@ export NCCL_IB_DISABLE=0
 GPUS_PER_NODE=4
 TOTAL_GPUS=$((SLURM_NNODES * GPUS_PER_NODE))
 
-echo "=============================================="
-echo "FSDP Large Model Test (Expect Success)"
-echo "=============================================="
 echo "Model: DINOv2-Large (300M params)"
 echo "Batch size per GPU: 256"
 echo "Total GPUs: $TOTAL_GPUS"
 echo "Sharding strategy: FULL_SHARD"
-echo "=============================================="
 
 srun --ntasks-per-node=1 --cpu-bind=none bash -c '
     echo "[$(hostname)] Starting FSDP large model test"

@@ -42,7 +42,7 @@ distributed_type: FSDP
 # Hardware configuration
 gpu_ids: all
 num_machines: 1
-num_processes: 4  # Adjust to your GPU count
+num_processes: 4
 
 # Multi-node settings (when num_machines > 1)
 machine_rank: 0

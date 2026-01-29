@@ -3,7 +3,7 @@
 #SBATCH --time=4:00:00
 #SBATCH --partition=peerd
 
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=32
@@ -12,28 +12,9 @@
 #SBATCH --output=logs/dinov2_fsdp_%j.out
 #SBATCH --error=logs/dinov2_fsdp_%j.err
 
-# ==============================================================================
-# FSDP Training: DINOv2 Fine-tuning on Food-101
-# ==============================================================================
-# This script runs Fully Sharded Data Parallel (FSDP) training across multiple
-# nodes. FSDP shards model parameters, gradients, and optimizer states across
-# all GPUs, dramatically reducing per-GPU memory usage.
-#
-# Configuration:
-#   - 2 nodes x 4 GPUs = 8 GPUs total
-#   - Model parameters are sharded across all 8 GPUs
-#   - Each GPU only stores 1/8th of the model weights
-#   - Parameters are gathered on-demand during forward/backward
-#
-# When to use FSDP over DDP:
-#   - Model doesn't fit in single GPU memory
-#   - You want to train with larger batch sizes
-#   - You're training models with >1B parameters
-# ==============================================================================
-
 # Activate your environment
 source ~/.bashrc
-activate_env cg
+activate_env dis-tr
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
@@ -58,15 +39,11 @@ export FSDP_USE_ORIG_PARAMS=true
 GPUS_PER_NODE=4
 TOTAL_GPUS=$((SLURM_NNODES * GPUS_PER_NODE))
 
-echo "=============================================="
-echo "FSDP Training Configuration"
-echo "=============================================="
 echo "Nodes: $SLURM_NNODES"
 echo "GPUs per node: $GPUS_PER_NODE"
 echo "Total GPUs: $TOTAL_GPUS"
 echo "Master: $MASTER_ADDR:$MASTER_PORT"
 echo "Sharding strategy: FULL_SHARD"
-echo "=============================================="
 
 # Run training using srun + accelerate with FSDP
 srun --ntasks-per-node=1 --cpu-bind=none bash -c '

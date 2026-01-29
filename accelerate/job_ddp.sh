@@ -3,7 +3,7 @@
 #SBATCH --time=4:00:00
 #SBATCH --partition=peerd
 
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=32
@@ -11,18 +11,6 @@
 
 #SBATCH --output=logs/dinov2_ddp_%j.out
 #SBATCH --error=logs/dinov2_ddp_%j.err
-
-# ==============================================================================
-# DDP Training: DINOv2 Fine-tuning on Food-101
-# ==============================================================================
-# This script runs Distributed Data Parallel (DDP) training across multiple
-# nodes. DDP replicates the full model on each GPU and synchronizes gradients.
-#
-# Configuration:
-#   - 2 nodes x 4 GPUs = 8 GPUs total
-#   - Each GPU holds a complete copy of the model
-#   - Gradients are averaged across all GPUs via all-reduce
-# ==============================================================================
 
 # Activate your environment
 source ~/.bashrc
@@ -44,14 +32,11 @@ export ACCELERATE_MIXED_PRECISION=fp16
 GPUS_PER_NODE=4
 TOTAL_GPUS=$((SLURM_NNODES * GPUS_PER_NODE))
 
-echo "=============================================="
 echo "DDP Training Configuration"
-echo "=============================================="
 echo "Nodes: $SLURM_NNODES"
 echo "GPUs per node: $GPUS_PER_NODE"
 echo "Total GPUs: $TOTAL_GPUS"
 echo "Master: $MASTER_ADDR:$MASTER_PORT"
-echo "=============================================="
 
 # Run training using srun + accelerate
 # Each node runs one task, accelerate handles the per-GPU processes
