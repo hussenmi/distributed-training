@@ -14,7 +14,7 @@
 
 # Activate your environment
 source ~/.bashrc
-activate_env cg
+activate_env dis-tr
 
 # Create logs directory if it doesn't exist
 mkdir -p logs

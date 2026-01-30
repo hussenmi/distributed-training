@@ -1,30 +1,3 @@
-# Accelerate Configuration: Distributed Data Parallel (DDP)
-# ==============================================================================
-#
-# DDP (DistributedDataParallel) is PyTorch's standard data parallelism strategy:
-#
-# How it works:
-#   1. Each GPU holds a COMPLETE copy of the model
-#   2. Each GPU processes different mini-batches of data
-#   3. After backward pass, gradients are synchronized via all-reduce
-#   4. All GPUs update their model copies identically
-#
-# Memory per GPU:
-#   - Full model parameters
-#   - Full gradients
-#   - Full optimizer states (2x model size for Adam)
-#   - Activations for the batch
-#
-# Best for:
-#   - Models that fit in a single GPU's memory
-#   - Maximum training throughput (minimal communication)
-#   - Simple distributed training setup
-#
-# Usage:
-#   accelerate launch --config_file config_ddp.yaml train.py
-#
-# ==============================================================================
-
 compute_environment: LOCAL_MACHINE
 distributed_type: MULTI_GPU
 

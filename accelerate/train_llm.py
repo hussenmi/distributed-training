@@ -1,18 +1,3 @@
-"""
-Distributed Training Comparison: DDP vs FSDP for LLM Fine-tuning
-
-This script fine-tunes a 7B parameter LLM (Mistral-7B) to demonstrate
-when FSDP becomes necessary. DDP will OOM on this model size, while
-FSDP will succeed by sharding the model across GPUs.
-
-Usage:
-    # DDP (expected to OOM)
-    sbatch job_ddp_llm.sh
-
-    # FSDP (expected to succeed)
-    sbatch job_fsdp_llm.sh
-"""
-
 import argparse
 import time
 import os

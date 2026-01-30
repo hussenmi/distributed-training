@@ -5,13 +5,6 @@ Fine-tuning DINOv2 on Food-101 using HuggingFace Accelerate
 This script fine-tunes a pretrained DINOv2 model for image classification.
 The same script works with both DDP and FSDP - the strategy is controlled
 entirely by the Accelerate config file.
-
-Usage (single node):
-    accelerate launch --config_file config_ddp.yaml train.py
-    accelerate launch --config_file config_fsdp.yaml train.py
-
-Usage (multi-node SLURM):
-    See the provided SLURM job scripts (job_ddp.sh, job_fsdp.sh)
 """
 
 import argparse
